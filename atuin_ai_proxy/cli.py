@@ -16,6 +16,11 @@ def main(argv: list[str] | None = None) -> int:
     serve = subparsers.add_parser("serve", help="Run the Atuin AI proxy")
     serve.add_argument("--host")
     serve.add_argument("--port", type=int)
+    serve.add_argument(
+        "--debug",
+        action="store_true",
+        help="Shortcut for LOG_LEVEL=DEBUG",
+    )
 
     auth = subparsers.add_parser("auth", help="Manage Codex OAuth credentials")
     auth_subparsers = auth.add_subparsers(dest="auth_command")
@@ -33,6 +38,8 @@ def main(argv: list[str] | None = None) -> int:
                 settings.host = args.host
             if args.port:
                 settings.port = args.port
+            if args.debug:
+                settings.log_level = "DEBUG"
             run_server(settings)
             return 0
         if args.command == "auth":

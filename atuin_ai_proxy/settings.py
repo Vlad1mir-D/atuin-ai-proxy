@@ -4,6 +4,8 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+from .diagnostics import DEFAULT_TRACE_PAYLOAD_BYTES
+
 
 DEFAULT_CODEX_BASE_URL = "https://chatgpt.com/backend-api/codex"
 DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
@@ -43,6 +45,7 @@ class Settings:
     codex_auth_api_base_url: str = DEFAULT_CODEX_ISSUER
     codex_client_id: str = CODEX_CLIENT_ID
     request_timeout_seconds: int = 120
+    trace_payload_bytes: int = DEFAULT_TRACE_PAYLOAD_BYTES
     host: str = "127.0.0.1"
     port: int = 8000
     log_level: str = "INFO"
@@ -74,6 +77,10 @@ class Settings:
             ),
             codex_client_id=os.getenv("CODEX_CLIENT_ID", CODEX_CLIENT_ID),
             request_timeout_seconds=_env_int("REQUEST_TIMEOUT_SECONDS", 120),
+            trace_payload_bytes=_env_int(
+                "TRACE_PAYLOAD_BYTES",
+                DEFAULT_TRACE_PAYLOAD_BYTES,
+            ),
             host=os.getenv("HOST", "127.0.0.1"),
             port=_env_int("PORT", 8000),
             log_level=os.getenv("LOG_LEVEL", "INFO"),

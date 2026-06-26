@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Iterator
 from http.client import HTTPConnection, HTTPSConnection
 from typing import Any
@@ -8,7 +9,11 @@ from urllib.parse import urljoin, urlparse
 
 from . import __version__
 from .auth import AuthError, provider_for_settings
+from .diagnostics import TRACE_LEVEL, redact, sanitized_json_excerpt, sanitized_text_excerpt
 from .settings import Settings
+
+
+logger = logging.getLogger(__name__)
 
 
 class BackendHTTPError(RuntimeError):
@@ -24,17 +29,21 @@ class ResponsesBackend:
         self.auth_provider = provider_for_settings(settings)
 
     def open_stream(
-        self, body: dict[str, Any]
+        self, body: dict[str, Any], request_id: str | None = None
     ) -> tuple[int, dict[str, str], Iterator[tuple[str, dict[str, Any]]]]:
         try:
-            return self._open_stream_once(body)
+            return self._open_stream_once(body, request_id)
         except BackendHTTPError as exc:
             if exc.status == 401 and self.auth_provider.refresh():
-                return self._open_stream_once(body)
+                logger.info(
+                    "Retrying backend request after credential refresh request_id=%s",
+                    request_id,
+                )
+                return self._open_stream_once(body, request_id)
             raise
 
     def _open_stream_once(
-        self, body: dict[str, Any]
+        self, body: dict[str, Any], request_id: str | None
     ) -> tuple[int, dict[str, str], Iterator[tuple[str, dict[str, Any]]]]:
         url = urljoin(self.settings.backend_base_url.rstrip("/") + "/", "responses")
         headers = {
@@ -48,10 +57,47 @@ class ResponsesBackend:
             raise
 
         body_bytes = json.dumps(body, separators=(",", ":")).encode("utf-8")
+        logger.debug(
+            "Opening backend stream request_id=%s backend=%s path=%s body_bytes=%s tools=%s",
+            request_id,
+            self.settings.backend,
+            _safe_url_path(url),
+            len(body_bytes),
+            _tool_names(body),
+        )
+        if logger.isEnabledFor(TRACE_LEVEL):
+            logger.log(
+                TRACE_LEVEL,
+                "Backend request payload request_id=%s body=%s",
+                request_id,
+                sanitized_json_excerpt(body, self.settings.trace_payload_bytes),
+            )
+            logger.log(
+                TRACE_LEVEL,
+                "Backend request headers request_id=%s headers=%s",
+                request_id,
+                redact(headers),
+            )
         response, connection = _post(url, headers, body_bytes, self.settings.request_timeout_seconds)
         response_headers = {key.lower(): value for key, value in response.getheaders()}
+        logger.debug(
+            "Backend stream opened request_id=%s upstream_status=%s",
+            request_id,
+            response.status,
+        )
         if not 200 <= response.status < 300:
             error_body = response.read().decode("utf-8", errors="replace")
+            if logger.isEnabledFor(TRACE_LEVEL):
+                logger.log(
+                    TRACE_LEVEL,
+                    "Backend error body request_id=%s upstream_status=%s body=%s",
+                    request_id,
+                    response.status,
+                    sanitized_text_excerpt(
+                        error_body,
+                        self.settings.trace_payload_bytes,
+                    ),
+                )
             connection.close()
             raise BackendHTTPError(response.status, error_body)
 
@@ -124,3 +170,22 @@ def _response_lines(response: Any) -> Iterator[str]:
         if not line:
             break
         yield line.decode("utf-8", errors="replace")
+
+
+def _safe_url_path(url: str) -> str:
+    parsed = urlparse(url)
+    path = parsed.path or "/"
+    if parsed.query:
+        return path + "?[query]"
+    return path
+
+
+def _tool_names(body: dict[str, Any]) -> list[str]:
+    tools = body.get("tools")
+    if not isinstance(tools, list):
+        return []
+    names = []
+    for tool in tools:
+        if isinstance(tool, dict) and tool.get("name"):
+            names.append(str(tool["name"]))
+    return names

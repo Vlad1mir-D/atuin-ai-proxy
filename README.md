@@ -61,6 +61,41 @@ python3 -m unittest discover -s tests
 python3 -m atuin_ai_proxy serve
 ```
 
+## Debugging
+
+The proxy includes a request id in every HTTP response and in stream errors. When
+Atuin reports `SSE request failed (...)`, copy the `request_id` from the JSON
+body and search for it in the proxy logs.
+
+Logging levels:
+
+```sh
+# Normal operational logs
+LOG_LEVEL=INFO
+
+# Request/backend diagnostics: model source, upstream status, tool names, timings
+LOG_LEVEL=DEBUG
+
+# DEBUG plus sanitized request, backend, and SSE payload excerpts
+LOG_LEVEL=TRACE
+TRACE_PAYLOAD_BYTES=4096
+```
+
+TRACE output is sanitized and bounded, but it can still include shell history,
+prompts, paths, and command output. Use it only while diagnosing a problem.
+
+Common failures:
+
+- `400 missing_model`: set `MODEL=...` or configure Atuin to send a model.
+- `400 invalid_json` / `400 invalid_request`: Atuin sent a body the proxy could
+  not parse or convert.
+- `401 unauthorized`: Atuin `[ai].api_token` does not match `ATUIN_PROXY_TOKEN`.
+- `502 auth_error`: backend auth is missing or invalid.
+- `502 upstream_http_error`: the selected backend rejected the converted
+  Responses request; the error body includes a sanitized upstream excerpt.
+- `504 upstream_timeout`: the backend did not respond before
+  `REQUEST_TIMEOUT_SECONDS`.
+
 ## Protocol notes
 
 The proxy accepts `POST /api/cli/chat`, returns `text/event-stream`, sets `x-atuin-ai-session-id`, and translates OpenAI/Codex Responses stream events into Atuin stream events:

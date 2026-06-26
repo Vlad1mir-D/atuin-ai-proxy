@@ -3,12 +3,13 @@ import unittest
 from io import BytesIO
 from types import SimpleNamespace
 
+from atuin_ai_proxy.backend import BackendHTTPError
 from atuin_ai_proxy.server import ProxyRequestHandler
 from atuin_ai_proxy.settings import Settings
 
 
 class FakeBackend:
-    def open_stream(self, body):
+    def open_stream(self, body, request_id=None):
         self.body = body
         return 200, {}, iter(
             [
@@ -19,6 +20,31 @@ class FakeBackend:
                 ("response.completed", {}),
             ]
         )
+
+
+class FailingHTTPBackend:
+    def open_stream(self, body, request_id=None):
+        raise BackendHTTPError(
+            400,
+            json.dumps(
+                {
+                    "error": {
+                        "message": "invalid backend payload",
+                        "access_token": "at-secret",
+                        "account_id": "acct-secret",
+                    }
+                }
+            ),
+        )
+
+
+class StreamingFailureBackend:
+    def open_stream(self, body, request_id=None):
+        def events():
+            yield ("response.output_text.delta", {"delta": "before failure"})
+            raise RuntimeError("upstream stream broke")
+
+        return 200, {}, events()
 
 
 class ServerTests(unittest.TestCase):
@@ -83,6 +109,85 @@ class ServerTests(unittest.TestCase):
         )
 
         self.assertEqual(response.status, 401)
+        self.assertIn("x-request-id", response.headers)
+        payload = json.loads(response.body)
+        self.assertEqual(payload["error"]["code"], "unauthorized")
+        self.assertEqual(payload["error"]["request_id"], response.headers["x-request-id"])
+
+    def test_chat_endpoint_returns_structured_missing_model_error(self) -> None:
+        payload = json.dumps({"messages": [], "config": {}, "invocation_id": "i"})
+        request = (
+            "POST /api/cli/chat HTTP/1.1\r\n"
+            "Host: localhost\r\n"
+            "Content-Type: application/json\r\n"
+            f"Content-Length: {len(payload.encode())}\r\n"
+            "\r\n"
+            f"{payload}"
+        ).encode()
+
+        response = handle_request(
+            request,
+            Settings(backend="openai", openai_api_key="sk-test"),
+            lambda _settings: FakeBackend(),
+        )
+
+        self.assertEqual(response.status, 400)
+        self.assertIn("x-request-id", response.headers)
+        error = json.loads(response.body)["error"]
+        self.assertEqual(error["code"], "missing_model")
+        self.assertIn("MODEL must be configured", error["message"])
+        self.assertEqual(error["request_id"], response.headers["x-request-id"])
+
+    def test_chat_endpoint_returns_sanitized_upstream_http_error(self) -> None:
+        payload = json.dumps({"messages": [], "config": {}, "invocation_id": "i"})
+        request = (
+            "POST /api/cli/chat HTTP/1.1\r\n"
+            "Host: localhost\r\n"
+            "Content-Type: application/json\r\n"
+            f"Content-Length: {len(payload.encode())}\r\n"
+            "\r\n"
+            f"{payload}"
+        ).encode()
+
+        response = handle_request(
+            request,
+            Settings(backend="openai", model="gpt-test", openai_api_key="sk-test"),
+            lambda _settings: FailingHTTPBackend(),
+        )
+
+        self.assertEqual(response.status, 502)
+        self.assertIn("x-request-id", response.headers)
+        error = json.loads(response.body)["error"]
+        self.assertEqual(error["code"], "upstream_http_error")
+        self.assertEqual(error["upstream_status"], 400)
+        self.assertIn("invalid backend payload", error["details"])
+        self.assertIn("[REDACTED]", error["details"])
+        self.assertNotIn("at-secret", error["details"])
+        self.assertNotIn("acct-secret", error["details"])
+
+    def test_streaming_failure_emits_error_event_with_request_id(self) -> None:
+        payload = json.dumps({"messages": [], "config": {}, "invocation_id": "i"})
+        request = (
+            "POST /api/cli/chat HTTP/1.1\r\n"
+            "Host: localhost\r\n"
+            "Content-Type: application/json\r\n"
+            f"Content-Length: {len(payload.encode())}\r\n"
+            "\r\n"
+            f"{payload}"
+        ).encode()
+
+        response = handle_request(
+            request,
+            Settings(backend="openai", model="gpt-test", openai_api_key="sk-test"),
+            lambda _settings: StreamingFailureBackend(),
+        )
+
+        body = response.body.decode()
+        self.assertEqual(response.status, 200)
+        self.assertIn("x-request-id", response.headers)
+        self.assertIn('event: text\ndata: {"content":"before failure"}\n\n', body)
+        self.assertIn('"code":"upstream_protocol_error"', body)
+        self.assertIn(f'"request_id":"{response.headers["x-request-id"]}"', body)
 
 
 class NonClosingBytesIO(BytesIO):
