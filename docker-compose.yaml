@@ -1,0 +1,28 @@
+services:
+  atuin-ai-proxy:
+    build: .
+    environment:
+      BACKEND: ${BACKEND:-openai}
+      MODEL: ${MODEL:-}
+      ATUIN_PROXY_TOKEN: ${ATUIN_PROXY_TOKEN:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
+      CODEX_ACCESS_TOKEN: ${CODEX_ACCESS_TOKEN:-}
+      CODEX_ACCOUNT_ID: ${CODEX_ACCOUNT_ID:-}
+      CODEX_FEDRAMP: ${CODEX_FEDRAMP:-false}
+      CODEX_HOME: /data/codex
+      CODEX_AUTH_FILE: ${CODEX_AUTH_FILE:-}
+      CODEX_BASE_URL: ${CODEX_BASE_URL:-https://chatgpt.com/backend-api/codex}
+      CODEX_ISSUER: ${CODEX_ISSUER:-https://auth.openai.com}
+      CODEX_AUTH_API_BASE_URL: ${CODEX_AUTH_API_BASE_URL:-https://auth.openai.com}
+      REQUEST_TIMEOUT_SECONDS: ${REQUEST_TIMEOUT_SECONDS:-120}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      HOST: 0.0.0.0
+      PORT: 8000
+    ports:
+      - "8000:8000"
+    volumes:
+      - codex-auth:/data/codex
+
+volumes:
+  codex-auth:

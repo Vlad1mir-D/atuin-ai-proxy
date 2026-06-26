@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "atuin-ai-proxy"
+version = "0.1.0"
+description = "Atuin Hub-compatible AI proxy for OpenAI and Codex backends"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "MIT"
+authors = [{ name = "Atuin AI Proxy contributors" }]
+dependencies = []
+
+[project.scripts]
+atuin-ai-proxy = "atuin_ai_proxy.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["atuin_ai_proxy*"]
