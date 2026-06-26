@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Iterable, Iterator
 from typing import Any
 
 
 JSON = dict[str, Any]
+logger = logging.getLogger(__name__)
 
 
 CAPABILITY_TO_TOOL = {
@@ -33,16 +35,26 @@ def encode_sse_event(event: str, data: Any) -> bytes:
     return ("\n".join(lines) + "\n\n").encode("utf-8")
 
 
-def build_responses_request(atuin_request: JSON, settings: Any) -> JSON:
+def build_responses_request(
+    atuin_request: JSON, settings: Any, request_id: str | None = None
+) -> JSON:
     config = atuin_request.get("config") or {}
     model = config.get("model") or settings.model
     if not model:
         raise ValueError("MODEL must be configured or supplied by Atuin config.model")
 
     capabilities = set(config.get("capabilities") or [])
+    messages = atuin_request.get("messages") or []
+    completed_tool_use_ids = _tool_result_ids(messages)
     input_items = [_context_message(atuin_request)]
-    for message in atuin_request.get("messages") or []:
-        input_items.extend(_convert_message(message))
+    for message in messages:
+        input_items.extend(
+            _convert_message(
+                message,
+                completed_tool_use_ids,
+                request_id=request_id,
+            )
+        )
 
     return {
         "model": model,
@@ -98,7 +110,13 @@ def _context_message(atuin_request: JSON) -> JSON:
     return _message("user", "Atuin client context:\n" + _compact_json(context))
 
 
-def _convert_message(message: JSON) -> list[JSON]:
+def _convert_message(
+    message: JSON,
+    completed_tool_use_ids: set[str] | None = None,
+    *,
+    request_id: str | None = None,
+) -> list[JSON]:
+    completed_tool_use_ids = completed_tool_use_ids or set()
     role = message.get("role") or "user"
     content = message.get("content")
     if isinstance(content, str):
@@ -120,14 +138,31 @@ def _convert_message(message: JSON) -> list[JSON]:
             if text_parts:
                 converted.append(_message(role, "\n".join(text_parts)))
                 text_parts = []
+            call_id = str(block.get("id") or "")
+            name = str(block.get("name") or "")
             converted.append(
                 {
                     "type": "function_call",
-                    "call_id": str(block.get("id") or ""),
-                    "name": str(block.get("name") or ""),
+                    "call_id": call_id,
+                    "name": name,
                     "arguments": _compact_json(block.get("input") or {}),
                 }
             )
+            if call_id not in completed_tool_use_ids:
+                converted.append(
+                    {
+                        "type": "function_call_output",
+                        "call_id": call_id,
+                        "output": _synthetic_tool_result_output(name),
+                    }
+                )
+                logger.debug(
+                    "Repaired orphaned Atuin tool call history request_id=%s "
+                    "tool_name=%s call_id=%s",
+                    request_id,
+                    name,
+                    call_id,
+                )
         elif block_type == "tool_result":
             if text_parts:
                 converted.append(_message(role, "\n".join(text_parts)))
@@ -147,6 +182,21 @@ def _convert_message(message: JSON) -> list[JSON]:
     return converted
 
 
+def _tool_result_ids(messages: list[JSON]) -> set[str]:
+    tool_use_ids: set[str] = set()
+    for message in messages:
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not isinstance(block, dict) or block.get("type") != "tool_result":
+                continue
+            tool_use_id = block.get("tool_use_id")
+            if tool_use_id:
+                tool_use_ids.add(str(tool_use_id))
+    return tool_use_ids
+
+
 def _message(role: str, text: str) -> JSON:
     content_type = "input_text" if role != "assistant" else "output_text"
     return {
@@ -163,6 +213,19 @@ def _tool_result_output(block: JSON) -> str:
         return f"[Atuin remote tool result{suffix}]"
     content = block.get("content")
     return content if isinstance(content, str) else _compact_json(content)
+
+
+def _synthetic_tool_result_output(name: str) -> str:
+    if name == "suggest_command":
+        return (
+            "Atuin displayed this command suggestion to the user; no command execution "
+            "output is available. Use current context or last_command if present to "
+            "infer whether it was later run."
+        )
+    return (
+        "Atuin did not provide a result for this previous tool call; treat the result "
+        "as unavailable."
+    )
 
 
 def _tool_call_from_item(item: JSON) -> JSON:

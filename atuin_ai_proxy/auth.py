@@ -8,7 +8,6 @@ import secrets
 import stat
 import time
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError
 from urllib.parse import urlencode, urljoin

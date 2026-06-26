@@ -65,10 +65,98 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(body["input"][2]["type"], "function_call")
         self.assertEqual(body["input"][2]["call_id"], "call_1")
         self.assertEqual(body["input"][3]["type"], "function_call_output")
+        call_1_outputs = [
+            item
+            for item in body["input"]
+            if item.get("type") == "function_call_output"
+            and item.get("call_id") == "call_1"
+        ]
+        self.assertEqual(len(call_1_outputs), 1)
+        self.assertEqual(call_1_outputs[0]["output"], "hello")
         tool_names = {tool["name"] for tool in body["tools"]}
         self.assertIn("suggest_command", tool_names)
         self.assertIn("read_file", tool_names)
         self.assertNotIn("write_file", tool_names)
+
+    def test_build_responses_request_repairs_orphaned_suggest_command_history(self) -> None:
+        settings = Settings(
+            backend="openai",
+            model="gpt-test",
+            openai_api_key="sk-test",
+        )
+        atuin_request = {
+            "messages": [
+                {"role": "user", "content": "show me the disk usage command"},
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "call_suggest_1",
+                            "name": "suggest_command",
+                            "input": {
+                                "command": "du -sh .",
+                                "confidence": "high",
+                                "danger": "low",
+                            },
+                        }
+                    ],
+                },
+                {"role": "user", "content": "now show the largest files"},
+            ],
+            "config": {"model": None},
+        }
+
+        body = build_responses_request(atuin_request, settings)
+
+        self.assertEqual(body["input"][2]["type"], "function_call")
+        self.assertEqual(body["input"][2]["call_id"], "call_suggest_1")
+        self.assertEqual(body["input"][3]["type"], "function_call_output")
+        self.assertEqual(body["input"][3]["call_id"], "call_suggest_1")
+        self.assertEqual(
+            body["input"][3]["output"],
+            "Atuin displayed this command suggestion to the user; no command execution "
+            "output is available. Use current context or last_command if present to "
+            "infer whether it was later run.",
+        )
+        self.assertEqual(body["input"][4]["role"], "user")
+        self.assertFalse(_orphaned_function_call_ids(body["input"]))
+
+    def test_build_responses_request_repairs_orphaned_client_tool_history(self) -> None:
+        settings = Settings(
+            backend="openai",
+            model="gpt-test",
+            openai_api_key="sk-test",
+        )
+        atuin_request = {
+            "messages": [
+                {"role": "user", "content": "read README"},
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "call_read_1",
+                            "name": "read_file",
+                            "input": {"file_path": "README.md"},
+                        }
+                    ],
+                },
+                {"role": "user", "content": "summarize it"},
+            ],
+            "config": {"capabilities": ["client_v1_read_file"], "model": None},
+        }
+
+        body = build_responses_request(atuin_request, settings)
+
+        self.assertEqual(body["input"][3]["type"], "function_call_output")
+        self.assertEqual(body["input"][3]["call_id"], "call_read_1")
+        self.assertEqual(
+            body["input"][3]["output"],
+            "Atuin did not provide a result for this previous tool call; treat the "
+            "result as unavailable.",
+        )
+        self.assertFalse(_orphaned_function_call_ids(body["input"]))
 
     def test_build_responses_request_requires_model(self) -> None:
         settings = Settings(backend="openai", openai_api_key="sk-test")
@@ -109,6 +197,20 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(
             translated[2], 'event: done\ndata: {"session_id":"session-1"}\n\n'
         )
+
+
+def _orphaned_function_call_ids(input_items: list[dict[str, object]]) -> set[str]:
+    call_ids = {
+        str(item.get("call_id"))
+        for item in input_items
+        if item.get("type") == "function_call"
+    }
+    output_ids = {
+        str(item.get("call_id"))
+        for item in input_items
+        if item.get("type") == "function_call_output"
+    }
+    return call_ids - output_ids
 
 
 if __name__ == "__main__":

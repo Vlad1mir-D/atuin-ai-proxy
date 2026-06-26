@@ -88,7 +88,11 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
             atuin_request = self._read_json_body()
             session_id = str(atuin_request.get("session_id") or uuid.uuid4())
             self._log_request_summary(request_id, atuin_request)
-            responses_body = build_responses_request(atuin_request, self.server.settings)
+            responses_body = build_responses_request(
+                atuin_request,
+                self.server.settings,
+                request_id=request_id,
+            )
             backend = self.server.backend_factory(self.server.settings)
             _status, _headers, upstream_events = backend.open_stream(
                 responses_body,
