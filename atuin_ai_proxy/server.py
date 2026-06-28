@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import signal
 import socket
 import time
 import uuid
@@ -28,6 +29,10 @@ from .settings import Settings
 
 BackendFactory = Callable[[Settings], Any]
 logger = logging.getLogger(__name__)
+
+
+def _raise_keyboard_interrupt(_signum: int, _frame: Any) -> None:
+    raise KeyboardInterrupt
 
 
 class ProxyHTTPServer(ThreadingHTTPServer):
@@ -320,9 +325,11 @@ def run_server(settings: Settings) -> None:
     )
     server = ProxyHTTPServer((settings.host, settings.port), settings)
     logging.info("Listening on %s:%s", settings.host, settings.port)
+    previous_sigterm_handler = signal.signal(signal.SIGTERM, _raise_keyboard_interrupt)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         logging.info("Shutting down")
     finally:
+        signal.signal(signal.SIGTERM, previous_sigterm_handler)
         server.server_close()

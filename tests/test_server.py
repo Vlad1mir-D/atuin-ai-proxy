@@ -1,10 +1,12 @@
 import json
+import signal
 import unittest
 from io import BytesIO
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from atuin_ai_proxy.backend import BackendHTTPError
-from atuin_ai_proxy.server import ProxyRequestHandler
+from atuin_ai_proxy.server import ProxyRequestHandler, run_server
 from atuin_ai_proxy.settings import Settings
 
 
@@ -188,6 +190,35 @@ class ServerTests(unittest.TestCase):
         self.assertIn('event: text\ndata: {"content":"before failure"}\n\n', body)
         self.assertIn('"code":"upstream_protocol_error"', body)
         self.assertIn(f'"request_id":"{response.headers["x-request-id"]}"', body)
+
+    def test_run_server_treats_sigterm_as_graceful_shutdown(self) -> None:
+        servers = []
+        sigterm_handlers = []
+
+        class FakeHTTPServer:
+            def __init__(self, _address, _settings) -> None:
+                self.closed = False
+                servers.append(self)
+
+            def serve_forever(self) -> None:
+                sigterm_handlers[-1](signal.SIGTERM, None)
+
+            def server_close(self) -> None:
+                self.closed = True
+
+        def fake_signal(signum, handler):
+            if signum == signal.SIGTERM:
+                sigterm_handlers.append(handler)
+            return signal.SIG_DFL
+
+        with (
+            patch("atuin_ai_proxy.server.ProxyHTTPServer", FakeHTTPServer),
+            patch("signal.signal", fake_signal),
+        ):
+            run_server(Settings(backend="openai", model="gpt-test"))
+
+        self.assertTrue(servers[0].closed)
+        self.assertEqual(sigterm_handlers[-1], signal.SIG_DFL)
 
 
 class NonClosingBytesIO(BytesIO):
