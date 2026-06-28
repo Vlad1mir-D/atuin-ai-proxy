@@ -79,25 +79,35 @@ def translate_responses_events(
 ) -> Iterator[bytes]:
     done_sent = False
     for event, data in upstream_events:
-        if event == "response.output_text.delta":
+        event_type = _responses_event_type(event, data)
+        if event_type == "response.output_text.delta":
             delta = data.get("delta") or data.get("text") or ""
             if delta:
                 yield encode_sse_event("text", {"content": delta})
-        elif event == "response.output_item.done":
+        elif event_type == "response.output_item.done":
             item = data.get("item") or {}
             if item.get("type") == "function_call":
                 yield encode_sse_event("tool_call", _tool_call_from_item(item))
-        elif event == "response.created":
+        elif event_type == "response.created":
             yield encode_sse_event("status", {"state": "thinking"})
-        elif event in {"response.failed", "response.incomplete", "error"}:
+        elif event_type in {"response.failed", "response.incomplete", "error"}:
             yield encode_sse_event("error", {"message": _error_message(data)})
             done_sent = True
-        elif event == "response.completed":
+        elif event_type == "response.completed":
             yield encode_sse_event("done", {"session_id": session_id})
             done_sent = True
 
     if not done_sent:
         yield encode_sse_event("done", {"session_id": session_id})
+
+
+def _responses_event_type(event: str, data: JSON) -> str:
+    if event != "message":
+        return event
+    data_type = data.get("type")
+    if isinstance(data_type, str):
+        return data_type
+    return event
 
 
 def _context_message(atuin_request: JSON) -> JSON:
@@ -143,17 +153,21 @@ def _convert_message(
             converted.append(
                 {
                     "type": "function_call",
+                    "id": _responses_item_id("fc", call_id),
                     "call_id": call_id,
                     "name": name,
                     "arguments": _compact_json(block.get("input") or {}),
+                    "status": "completed",
                 }
             )
             if call_id not in completed_tool_use_ids:
                 converted.append(
                     {
                         "type": "function_call_output",
+                        "id": _responses_item_id("fco", call_id),
                         "call_id": call_id,
                         "output": _synthetic_tool_result_output(name),
+                        "status": "completed",
                     }
                 )
                 logger.debug(
@@ -170,8 +184,13 @@ def _convert_message(
             converted.append(
                 {
                     "type": "function_call_output",
+                    "id": _responses_item_id(
+                        "fco",
+                        str(block.get("tool_use_id") or ""),
+                    ),
                     "call_id": str(block.get("tool_use_id") or ""),
                     "output": _tool_result_output(block),
+                    "status": "completed",
                 }
             )
         else:
@@ -180,6 +199,10 @@ def _convert_message(
     if text_parts:
         converted.append(_message(role, "\n".join(text_parts)))
     return converted
+
+
+def _responses_item_id(prefix: str, call_id: str) -> str:
+    return f"{prefix}_{call_id}" if call_id else prefix
 
 
 def _tool_result_ids(messages: list[JSON]) -> set[str]:
@@ -198,12 +221,7 @@ def _tool_result_ids(messages: list[JSON]) -> set[str]:
 
 
 def _message(role: str, text: str) -> JSON:
-    content_type = "input_text" if role != "assistant" else "output_text"
-    return {
-        "type": "message",
-        "role": role,
-        "content": [{"type": content_type, "text": text}],
-    }
+    return {"role": role, "content": text}
 
 
 def _tool_result_output(block: JSON) -> str:

@@ -158,6 +158,125 @@ class ProtocolTests(unittest.TestCase):
         )
         self.assertFalse(_orphaned_function_call_ids(body["input"]))
 
+    def test_build_responses_request_replays_text_history_as_string_content(self) -> None:
+        settings = Settings(
+            backend="openai",
+            model="gpt-test",
+            openai_api_key="sk-test",
+        )
+        atuin_request = {
+            "messages": [
+                {"role": "user", "content": "what are you?"},
+                {
+                    "role": "assistant",
+                    "content": "I'm Atuin AI, an assistant built into your shell.",
+                },
+                {"role": "user", "content": "What model are you based on?"},
+            ],
+            "config": {"model": None},
+        }
+
+        body = build_responses_request(atuin_request, settings)
+
+        assistant_message = body["input"][2]
+        self.assertEqual(assistant_message["role"], "assistant")
+        self.assertEqual(
+            assistant_message["content"],
+            "I'm Atuin AI, an assistant built into your shell.",
+        )
+
+    def test_build_responses_request_replays_tool_history_with_item_ids(self) -> None:
+        settings = Settings(
+            backend="openai",
+            model="gpt-test",
+            openai_api_key="sk-test",
+        )
+        atuin_request = {
+            "messages": [
+                {"role": "user", "content": "What model are you based on?"},
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "Let me check the project configuration.",
+                        },
+                        {
+                            "type": "tool_use",
+                            "id": "call_find_model",
+                            "name": "execute_shell_command",
+                            "input": {
+                                "command": "grep -ri \"model\" .",
+                                "description": "Find files mentioning model",
+                            },
+                        },
+                        {
+                            "type": "tool_use",
+                            "id": "call_list_files",
+                            "name": "execute_shell_command",
+                            "input": {
+                                "command": "ls -la",
+                                "description": "List project root files",
+                            },
+                        },
+                    ],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "call_find_model",
+                            "content": "Permission denied by the user",
+                            "is_error": True,
+                        },
+                    ],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "call_list_files",
+                            "content": "Exit code: 0\n\nstdout:\nREADME.md",
+                            "is_error": False,
+                        },
+                    ],
+                },
+            ],
+            "config": {
+                "capabilities": ["client_v1_execute_shell_command"],
+                "model": None,
+            },
+        }
+
+        body = build_responses_request(atuin_request, settings)
+
+        function_calls = [
+            item for item in body["input"] if item.get("type") == "function_call"
+        ]
+        function_outputs = [
+            item
+            for item in body["input"]
+            if item.get("type") == "function_call_output"
+        ]
+        self.assertEqual(
+            [item.get("id") for item in function_calls],
+            ["fc_call_find_model", "fc_call_list_files"],
+        )
+        self.assertEqual(
+            [item.get("id") for item in function_outputs],
+            ["fco_call_find_model", "fco_call_list_files"],
+        )
+        self.assertEqual(
+            [item["call_id"] for item in function_outputs],
+            ["call_find_model", "call_list_files"],
+        )
+        self.assertEqual(
+            [item.get("status") for item in function_calls + function_outputs],
+            ["completed", "completed", "completed", "completed"],
+        )
+
     def test_build_responses_request_requires_model(self) -> None:
         settings = Settings(backend="openai", openai_api_key="sk-test")
 
@@ -196,6 +315,43 @@ class ProtocolTests(unittest.TestCase):
         )
         self.assertEqual(
             translated[2], 'event: done\ndata: {"session_id":"session-1"}\n\n'
+        )
+
+    def test_translate_responses_events_uses_type_from_message_events(self) -> None:
+        upstream_events = [
+            ("message", {"type": "response.created"}),
+            (
+                "message",
+                {"type": "response.output_text.delta", "delta": "hello"},
+            ),
+            (
+                "message",
+                {
+                    "type": "response.output_item.done",
+                    "item": {
+                        "type": "function_call",
+                        "call_id": "call_3",
+                        "name": "suggest_command",
+                        "arguments": json.dumps({"command": "pwd"}),
+                    },
+                },
+            ),
+            ("message", {"message": "[DONE]"}),
+        ]
+
+        translated = [
+            event.decode()
+            for event in translate_responses_events(upstream_events, "session-2")
+        ]
+
+        self.assertEqual(
+            translated,
+            [
+                'event: status\ndata: {"state":"thinking"}\n\n',
+                'event: text\ndata: {"content":"hello"}\n\n',
+                'event: tool_call\ndata: {"id":"call_3","name":"suggest_command","input":{"command":"pwd","danger":"low","confidence":"medium"}}\n\n',
+                'event: done\ndata: {"session_id":"session-2"}\n\n',
+            ],
         )
 
 
