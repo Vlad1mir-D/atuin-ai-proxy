@@ -23,7 +23,14 @@ from .diagnostics import (
     sanitized_text_excerpt,
     structured_error,
 )
-from .protocol import build_responses_request, encode_sse_event, translate_responses_events
+from .protocol import (
+    build_chat_completions_request,
+    build_responses_request,
+    encode_sse_event,
+    resolve_model,
+    translate_chat_completions_events,
+    translate_responses_events,
+)
 from .settings import Settings
 
 
@@ -92,16 +99,12 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         try:
             atuin_request = self._read_json_body()
             session_id = str(atuin_request.get("session_id") or uuid.uuid4())
-            self._log_request_summary(request_id, atuin_request)
-            responses_body = build_responses_request(
-                atuin_request,
-                self.server.settings,
-                request_id=request_id,
-            )
+            resolve_model(atuin_request, self.server.settings)
             backend = self.server.backend_factory(self.server.settings)
-            _status, _headers, upstream_events = backend.open_stream(
-                responses_body,
-                request_id=request_id,
+            upstream_api, translate_events, upstream_events = self._open_upstream_stream(
+                backend,
+                atuin_request,
+                request_id,
             )
         except JSONDecodeError as exc:
             self._send_error(
@@ -184,7 +187,7 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         self.end_headers()
         try:
             logged_events = self._log_upstream_events(request_id, upstream_events)
-            for chunk in translate_responses_events(logged_events, session_id):
+            for chunk in translate_events(logged_events, session_id):
                 self.wfile.write(chunk)
                 self.wfile.flush()
         except Exception as exc:
@@ -270,13 +273,86 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         )
         self._send_json(status, payload, request_id=request_id)
 
-    def _log_request_summary(self, request_id: str, atuin_request: dict[str, Any]) -> None:
+    def _open_upstream_stream(
+        self,
+        backend: Any,
+        atuin_request: dict[str, Any],
+        request_id: str,
+    ) -> tuple[str, Callable[[Any, str], Any], Any]:
+        candidates = self.server.settings.openai_api_candidates()
+        for index, upstream_api in enumerate(candidates):
+            self._log_request_summary(request_id, atuin_request, upstream_api)
+            upstream_body, translate_events = self._build_upstream_request(
+                atuin_request,
+                request_id,
+                upstream_api,
+            )
+            try:
+                _status, _headers, upstream_events = backend.open_stream(
+                    upstream_body,
+                    request_id=request_id,
+                    api=upstream_api,
+                )
+                return upstream_api, translate_events, upstream_events
+            except BackendHTTPError as exc:
+                if not self._should_fallback_to_next_api(exc, index, candidates):
+                    raise
+                next_api = candidates[index + 1]
+                logger.info(
+                    "Retrying backend request with fallback API request_id=%s "
+                    "failed_api=%s fallback_api=%s upstream_status=%s",
+                    request_id,
+                    upstream_api,
+                    next_api,
+                    exc.status,
+                )
+        raise RuntimeError("No upstream API candidates configured")
+
+    def _build_upstream_request(
+        self,
+        atuin_request: dict[str, Any],
+        request_id: str,
+        upstream_api: str,
+    ) -> tuple[dict[str, Any], Callable[[Any, str], Any]]:
+        if upstream_api == "chat_completions":
+            return (
+                build_chat_completions_request(
+                    atuin_request,
+                    self.server.settings,
+                    request_id=request_id,
+                ),
+                translate_chat_completions_events,
+            )
+        return (
+            build_responses_request(
+                atuin_request,
+                self.server.settings,
+                request_id=request_id,
+            ),
+            translate_responses_events,
+        )
+
+    @staticmethod
+    def _should_fallback_to_next_api(
+        exc: BackendHTTPError,
+        index: int,
+        candidates: tuple[str, ...],
+    ) -> bool:
+        return index + 1 < len(candidates) and exc.status in {400, 404, 405, 422}
+
+    def _log_request_summary(
+        self,
+        request_id: str,
+        atuin_request: dict[str, Any],
+        upstream_api: str,
+    ) -> None:
         config = atuin_request.get("config") if isinstance(atuin_request.get("config"), dict) else {}
         model_source = "atuin" if config.get("model") else "proxy"
         logger.debug(
-            "Chat request summary request_id=%s backend=%s model_source=%s invocation_id=%s has_session_id=%s",
+            "Chat request summary request_id=%s backend=%s upstream_api=%s model_source=%s invocation_id=%s has_session_id=%s",
             request_id,
             self.server.settings.backend,
+            upstream_api,
             model_source,
             atuin_request.get("invocation_id"),
             bool(atuin_request.get("session_id")),

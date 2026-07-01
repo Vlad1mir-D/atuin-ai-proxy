@@ -12,6 +12,7 @@ DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
 DEFAULT_CODEX_ISSUER = "https://auth.openai.com"
 CODEX_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
 VALID_BACKENDS = {"openai", "codex-token", "codex-oauth"}
+VALID_OPENAI_APIS = {"auto", "responses", "chat_completions"}
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -35,6 +36,7 @@ class Settings:
     atuin_proxy_token: str | None = None
     openai_api_key: str | None = None
     openai_base_url: str = DEFAULT_OPENAI_BASE_URL
+    openai_api: str = "auto"
     codex_access_token: str | None = None
     codex_account_id: str | None = None
     codex_fedramp: bool = False
@@ -55,6 +57,10 @@ class Settings:
         if self.backend not in VALID_BACKENDS:
             valid = ", ".join(sorted(VALID_BACKENDS))
             raise ValueError(f"BACKEND must be one of: {valid}")
+        self.openai_api = self.openai_api.strip().lower().replace("-", "_")
+        if self.openai_api not in VALID_OPENAI_APIS:
+            valid = ", ".join(sorted(VALID_OPENAI_APIS))
+            raise ValueError(f"OPENAI_API must be one of: {valid}")
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -65,6 +71,7 @@ class Settings:
             atuin_proxy_token=os.getenv("ATUIN_PROXY_TOKEN") or None,
             openai_api_key=os.getenv("OPENAI_API_KEY") or None,
             openai_base_url=os.getenv("OPENAI_BASE_URL", DEFAULT_OPENAI_BASE_URL),
+            openai_api=os.getenv("OPENAI_API", "auto"),
             codex_access_token=os.getenv("CODEX_ACCESS_TOKEN") or None,
             codex_account_id=os.getenv("CODEX_ACCOUNT_ID") or None,
             codex_fedramp=_env_bool("CODEX_FEDRAMP"),
@@ -97,3 +104,10 @@ class Settings:
         if self.backend == "openai":
             return self.openai_base_url
         return self.codex_base_url
+
+    def openai_api_candidates(self) -> tuple[str, ...]:
+        if self.backend != "openai":
+            return ("responses",)
+        if self.openai_api != "auto":
+            return (self.openai_api,)
+        return ("chat_completions", "responses")

@@ -29,23 +29,30 @@ class ResponsesBackend:
         self.auth_provider = provider_for_settings(settings)
 
     def open_stream(
-        self, body: dict[str, Any], request_id: str | None = None
+        self,
+        body: dict[str, Any],
+        request_id: str | None = None,
+        api: str = "responses",
     ) -> tuple[int, dict[str, str], Iterator[tuple[str, dict[str, Any]]]]:
         try:
-            return self._open_stream_once(body, request_id)
+            return self._open_stream_once(body, request_id, api)
         except BackendHTTPError as exc:
             if exc.status == 401 and self.auth_provider.refresh():
                 logger.info(
                     "Retrying backend request after credential refresh request_id=%s",
                     request_id,
                 )
-                return self._open_stream_once(body, request_id)
+                return self._open_stream_once(body, request_id, api)
             raise
 
     def _open_stream_once(
-        self, body: dict[str, Any], request_id: str | None
+        self,
+        body: dict[str, Any],
+        request_id: str | None,
+        api: str,
     ) -> tuple[int, dict[str, str], Iterator[tuple[str, dict[str, Any]]]]:
-        url = urljoin(self.settings.backend_base_url.rstrip("/") + "/", "responses")
+        endpoint = "chat/completions" if api == "chat_completions" else "responses"
+        url = urljoin(self.settings.backend_base_url.rstrip("/") + "/", endpoint)
         headers = {
             "Accept": "text/event-stream",
             "Content-Type": "application/json",
@@ -186,6 +193,12 @@ def _tool_names(body: dict[str, Any]) -> list[str]:
         return []
     names = []
     for tool in tools:
-        if isinstance(tool, dict) and tool.get("name"):
+        if not isinstance(tool, dict):
+            continue
+        if tool.get("name"):
             names.append(str(tool["name"]))
+            continue
+        function = tool.get("function")
+        if isinstance(function, dict) and function.get("name"):
+            names.append(str(function["name"]))
     return names

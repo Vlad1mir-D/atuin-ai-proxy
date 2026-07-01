@@ -2,8 +2,10 @@ import json
 import unittest
 
 from atuin_ai_proxy.protocol import (
+    build_chat_completions_request,
     build_responses_request,
     encode_sse_event,
+    translate_chat_completions_events,
     translate_responses_events,
 )
 from atuin_ai_proxy.settings import Settings
@@ -283,6 +285,79 @@ class ProtocolTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "MODEL"):
             build_responses_request({"messages": [], "config": {}}, settings)
 
+    def test_build_chat_completions_request_converts_history_and_tools(self) -> None:
+        settings = Settings(
+            backend="openai",
+            model="chat-model",
+            openai_api_key="sk-test",
+        )
+        atuin_request = {
+            "messages": [
+                {"role": "user", "content": "list files"},
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "call_1",
+                            "name": "read_file",
+                            "input": {"file_path": "README.md"},
+                        }
+                    ],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "call_1",
+                            "content": "hello",
+                            "is_error": False,
+                        }
+                    ],
+                },
+            ],
+            "context": {"shell": "bash", "pwd": "/tmp"},
+            "config": {
+                "capabilities": ["client_v1_read_file"],
+                "model": None,
+            },
+            "invocation_id": "inv-1",
+        }
+
+        body = build_chat_completions_request(atuin_request, settings)
+
+        self.assertEqual(body["model"], "chat-model")
+        self.assertTrue(body["stream"])
+        self.assertNotIn("store", body)
+        self.assertEqual(body["messages"][0]["role"], "system")
+        self.assertEqual(body["messages"][1]["role"], "user")
+        self.assertEqual(body["messages"][2], {"role": "user", "content": "list files"})
+        assistant_message = body["messages"][3]
+        self.assertEqual(assistant_message["role"], "assistant")
+        self.assertIsNone(assistant_message["content"])
+        self.assertEqual(
+            assistant_message["tool_calls"],
+            [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {
+                        "name": "read_file",
+                        "arguments": '{"file_path":"README.md"}',
+                    },
+                }
+            ],
+        )
+        self.assertEqual(
+            body["messages"][4],
+            {"role": "tool", "tool_call_id": "call_1", "content": "hello"},
+        )
+        tool_names = {tool["function"]["name"] for tool in body["tools"]}
+        self.assertIn("suggest_command", tool_names)
+        self.assertIn("read_file", tool_names)
+        self.assertNotIn("write_file", tool_names)
+
     def test_translate_responses_events_maps_text_tool_and_done(self) -> None:
         upstream_events = [
             (
@@ -352,6 +427,80 @@ class ProtocolTests(unittest.TestCase):
                 'event: tool_call\ndata: {"id":"call_3","name":"suggest_command","input":{"command":"pwd","danger":"low","confidence":"medium"}}\n\n',
                 'event: done\ndata: {"session_id":"session-2"}\n\n',
             ],
+        )
+
+    def test_translate_chat_completions_events_maps_text_tool_and_done(self) -> None:
+        upstream_events = [
+            (
+                "message",
+                {
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {"content": "ls"},
+                            "finish_reason": None,
+                        }
+                    ]
+                },
+            ),
+            (
+                "message",
+                {
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {
+                                "tool_calls": [
+                                    {
+                                        "index": 0,
+                                        "id": "call_2",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "suggest_command",
+                                            "arguments": '{"command"',
+                                        },
+                                    }
+                                ]
+                            },
+                            "finish_reason": None,
+                        }
+                    ]
+                },
+            ),
+            (
+                "message",
+                {
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {
+                                "tool_calls": [
+                                    {
+                                        "index": 0,
+                                        "function": {"arguments": ':"ls -la"}'},
+                                    }
+                                ]
+                            },
+                            "finish_reason": "tool_calls",
+                        }
+                    ]
+                },
+            ),
+            ("message", {"message": "[DONE]"}),
+        ]
+
+        translated = [
+            event.decode()
+            for event in translate_chat_completions_events(upstream_events, "session-1")
+        ]
+
+        self.assertEqual(translated[0], 'event: text\ndata: {"content":"ls"}\n\n')
+        self.assertEqual(
+            translated[1],
+            'event: tool_call\ndata: {"id":"call_2","name":"suggest_command","input":{"command":"ls -la","danger":"low","confidence":"medium"}}\n\n',
+        )
+        self.assertEqual(
+            translated[2], 'event: done\ndata: {"session_id":"session-1"}\n\n'
         )
 
 

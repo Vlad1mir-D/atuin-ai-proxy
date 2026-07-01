@@ -11,21 +11,76 @@ from atuin_ai_proxy.settings import Settings
 
 
 class FakeBackend:
-    def open_stream(self, body, request_id=None):
+    def open_stream(self, body, request_id=None, api="responses"):
         self.body = body
+        self.api = api
+        if api == "chat_completions":
+            return 200, {}, iter(
+                [
+                    (
+                        "message",
+                        {
+                            "choices": [
+                                {
+                                    "index": 0,
+                                    "delta": {"content": "hello"},
+                                    "finish_reason": None,
+                                }
+                            ]
+                        },
+                    ),
+                    ("message", {"message": "[DONE]"}),
+                ]
+            )
+        return 200, {}, iter(
+            [
+                ("response.output_text.delta", {"delta": "hello"}),
+                ("response.completed", {}),
+            ]
+        )
+
+
+class ChatCompletionsBackend:
+    def open_stream(self, body, request_id=None, api="responses"):
+        self.body = body
+        self.api = api
         return 200, {}, iter(
             [
                 (
-                    "response.output_text.delta",
-                    {"delta": "hello"},
+                    "message",
+                    {
+                        "choices": [
+                            {
+                                "index": 0,
+                                "delta": {"content": "hello"},
+                                "finish_reason": None,
+                            }
+                        ]
+                    },
                 ),
+                ("message", {"message": "[DONE]"}),
+            ]
+        )
+
+
+class ChatCompletionsFallbackBackend:
+    def __init__(self) -> None:
+        self.calls = []
+
+    def open_stream(self, body, request_id=None, api="responses"):
+        self.calls.append((api, body))
+        if api == "chat_completions":
+            raise BackendHTTPError(400, '{"detail":"chat completions rejected"}')
+        return 200, {}, iter(
+            [
+                ("response.output_text.delta", {"delta": "fallback"}),
                 ("response.completed", {}),
             ]
         )
 
 
 class FailingHTTPBackend:
-    def open_stream(self, body, request_id=None):
+    def open_stream(self, body, request_id=None, api="responses"):
         raise BackendHTTPError(
             400,
             json.dumps(
@@ -41,9 +96,23 @@ class FailingHTTPBackend:
 
 
 class StreamingFailureBackend:
-    def open_stream(self, body, request_id=None):
+    def open_stream(self, body, request_id=None, api="responses"):
         def events():
-            yield ("response.output_text.delta", {"delta": "before failure"})
+            if api == "chat_completions":
+                yield (
+                    "message",
+                    {
+                        "choices": [
+                            {
+                                "index": 0,
+                                "delta": {"content": "before failure"},
+                                "finish_reason": None,
+                            }
+                        ]
+                    },
+                )
+            else:
+                yield ("response.output_text.delta", {"delta": "before failure"})
             raise RuntimeError("upstream stream broke")
 
         return 200, {}, events()
@@ -91,6 +160,64 @@ class ServerTests(unittest.TestCase):
         self.assertIn('event: text\ndata: {"content":"hello"}\n\n', body)
         self.assertIn("event: done", body)
         self.assertEqual(backend.body["model"], "gpt-test")
+
+    def test_chat_endpoint_auto_uses_chat_completions_first(self) -> None:
+        backend = ChatCompletionsBackend()
+        payload = json.dumps({"messages": [], "config": {}, "invocation_id": "i"})
+        request = (
+            "POST /api/cli/chat HTTP/1.1\r\n"
+            "Host: localhost\r\n"
+            "Content-Type: application/json\r\n"
+            f"Content-Length: {len(payload.encode())}\r\n"
+            "\r\n"
+            f"{payload}"
+        ).encode()
+        response = handle_request(
+            request,
+            Settings(
+                backend="openai",
+                model="gpt-test",
+                openai_api_key="sk-test",
+            ),
+            lambda _settings: backend,
+        )
+
+        body = response.body.decode()
+        self.assertEqual(response.status, 200)
+        self.assertEqual(backend.api, "chat_completions")
+        self.assertIn("messages", backend.body)
+        self.assertNotIn("input", backend.body)
+        self.assertIn('event: text\ndata: {"content":"hello"}\n\n', body)
+        self.assertIn("event: done", body)
+
+    def test_chat_endpoint_auto_falls_back_to_responses_after_chat_rejection(self) -> None:
+        backend = ChatCompletionsFallbackBackend()
+        payload = json.dumps({"messages": [], "config": {}, "invocation_id": "i"})
+        request = (
+            "POST /api/cli/chat HTTP/1.1\r\n"
+            "Host: localhost\r\n"
+            "Content-Type: application/json\r\n"
+            f"Content-Length: {len(payload.encode())}\r\n"
+            "\r\n"
+            f"{payload}"
+        ).encode()
+        response = handle_request(
+            request,
+            Settings(
+                backend="openai",
+                model="gpt-test",
+                openai_api_key="sk-test",
+            ),
+            lambda _settings: backend,
+        )
+
+        body = response.body.decode()
+        self.assertEqual(response.status, 200)
+        self.assertEqual([api for api, _body in backend.calls], ["chat_completions", "responses"])
+        self.assertIn("messages", backend.calls[0][1])
+        self.assertIn("input", backend.calls[1][1])
+        self.assertIn('event: text\ndata: {"content":"fallback"}\n\n', body)
+        self.assertIn("event: done", body)
 
     def test_chat_endpoint_rejects_wrong_proxy_token(self) -> None:
         response = handle_request(

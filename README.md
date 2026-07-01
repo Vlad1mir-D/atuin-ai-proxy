@@ -1,6 +1,6 @@
 # Atuin AI Proxy
 
-Python 3 proxy that exposes the Atuin Hub AI endpoint expected by Atuin and forwards requests to OpenAI or Codex-compatible Responses backends.
+Python 3 proxy that exposes the Atuin Hub AI endpoint expected by Atuin and forwards requests to OpenAI-compatible Chat Completions or Responses backends.
 
 ## Atuin config
 
@@ -26,9 +26,10 @@ docker compose up --build
 Backends:
 
 ```sh
-# OpenAI Responses API
+# OpenAI-compatible API
 BACKEND=openai
 OPENAI_API_KEY=sk-...
+OPENAI_API=auto
 MODEL=...
 
 # Codex access token or personal access token
@@ -42,6 +43,10 @@ BACKEND=codex-oauth
 CODEX_HOME=/data/codex
 MODEL=...
 ```
+
+`OPENAI_API` accepts `auto`, `responses`, or `chat_completions`. The default
+`auto` mode tries Chat Completions first and falls back to Responses when the
+Chat Completions request is rejected as unsupported.
 
 For Codex OAuth device login:
 
@@ -92,17 +97,20 @@ Common failures:
 - `401 unauthorized`: Atuin `[ai].api_token` does not match `ATUIN_PROXY_TOKEN`.
 - `502 auth_error`: backend auth is missing or invalid.
 - `502 upstream_http_error`: the selected backend rejected the converted
-  Responses request; the error body includes a sanitized upstream excerpt.
+  upstream request; the error body includes a sanitized upstream excerpt.
 - `504 upstream_timeout`: the backend did not respond before
   `REQUEST_TIMEOUT_SECONDS`.
 
 ## Protocol notes
 
-The proxy accepts `POST /api/cli/chat`, returns `text/event-stream`, sets `x-atuin-ai-session-id`, and translates OpenAI/Codex Responses stream events into Atuin stream events:
+The proxy accepts `POST /api/cli/chat`, returns `text/event-stream`, sets `x-atuin-ai-session-id`, and translates upstream stream events into Atuin stream events:
 
 - `response.output_text.delta` -> `text`
+- Chat Completions `choices[].delta.content` -> `text`
 - completed `function_call` items -> `tool_call`
+- completed Chat Completions `tool_calls` -> `tool_call`
 - `response.completed` -> `done`
+- Chat Completions `[DONE]` -> `done`
 - upstream failures -> `error`
 
 Client-side tools are exposed only when Atuin advertises the matching capability. The `suggest_command` tool is always exposed so models can send Atuin command suggestions.

@@ -39,9 +39,7 @@ def build_responses_request(
     atuin_request: JSON, settings: Any, request_id: str | None = None
 ) -> JSON:
     config = atuin_request.get("config") or {}
-    model = config.get("model") or settings.model
-    if not model:
-        raise ValueError("MODEL must be configured or supplied by Atuin config.model")
+    model = resolve_model(atuin_request, settings)
 
     capabilities = set(config.get("capabilities") or [])
     messages = atuin_request.get("messages") or []
@@ -66,11 +64,64 @@ def build_responses_request(
     }
 
 
+def build_chat_completions_request(
+    atuin_request: JSON, settings: Any, request_id: str | None = None
+) -> JSON:
+    config = atuin_request.get("config") or {}
+    model = resolve_model(atuin_request, settings)
+
+    capabilities = set(config.get("capabilities") or [])
+    messages = atuin_request.get("messages") or []
+    completed_tool_use_ids = _tool_result_ids(messages)
+    chat_messages = [{"role": "system", "content": SYSTEM_INSTRUCTIONS}]
+    chat_messages.append(_context_message(atuin_request))
+    for message in messages:
+        chat_messages.extend(
+            _convert_chat_message(
+                message,
+                completed_tool_use_ids,
+                request_id=request_id,
+            )
+        )
+
+    return {
+        "model": model,
+        "messages": chat_messages,
+        "tools": chat_tool_definitions(capabilities),
+        "tool_choice": "auto",
+        "stream": True,
+    }
+
+
+def resolve_model(atuin_request: JSON, settings: Any) -> str:
+    config = atuin_request.get("config") or {}
+    model = config.get("model") or settings.model
+    if not model:
+        raise ValueError("MODEL must be configured or supplied by Atuin config.model")
+    return str(model)
+
+
 def tool_definitions(capabilities: set[str]) -> list[JSON]:
     tools = [_suggest_command_tool()]
     for capability, name in CAPABILITY_TO_TOOL.items():
         if capability in capabilities:
             tools.append(_client_tool(name))
+    return tools
+
+
+def chat_tool_definitions(capabilities: set[str]) -> list[JSON]:
+    tools = []
+    for tool in tool_definitions(capabilities):
+        tools.append(
+            {
+                "type": "function",
+                "function": {
+                    "name": tool["name"],
+                    "description": tool["description"],
+                    "parameters": tool["parameters"],
+                },
+            }
+        )
     return tools
 
 
@@ -98,6 +149,51 @@ def translate_responses_events(
             done_sent = True
 
     if not done_sent:
+        yield encode_sse_event("done", {"session_id": session_id})
+
+
+def translate_chat_completions_events(
+    upstream_events: Iterable[tuple[str, JSON]], session_id: str
+) -> Iterator[bytes]:
+    done_sent = False
+    pending_tool_calls: dict[tuple[int, int], JSON] = {}
+    for event, data in upstream_events:
+        if _chat_done_event(event, data):
+            yield from _drain_chat_tool_calls(pending_tool_calls)
+            yield encode_sse_event("done", {"session_id": session_id})
+            done_sent = True
+            continue
+
+        if data.get("error"):
+            yield encode_sse_event("error", {"message": _error_message(data)})
+            done_sent = True
+            continue
+
+        choices = data.get("choices")
+        if not isinstance(choices, list):
+            continue
+
+        for choice in choices:
+            if not isinstance(choice, dict):
+                continue
+            choice_index = _chat_choice_index(choice)
+            delta = choice.get("delta") or {}
+            if not isinstance(delta, dict):
+                delta = {}
+
+            content = delta.get("content") or delta.get("refusal")
+            if content:
+                yield encode_sse_event("text", {"content": str(content)})
+
+            _accumulate_chat_tool_calls(choice_index, delta, pending_tool_calls)
+            if choice.get("finish_reason") in {"tool_calls", "function_call"}:
+                yield from _drain_chat_tool_calls(
+                    pending_tool_calls,
+                    choice_index=choice_index,
+                )
+
+    if not done_sent:
+        yield from _drain_chat_tool_calls(pending_tool_calls)
         yield encode_sse_event("done", {"session_id": session_id})
 
 
@@ -201,6 +297,92 @@ def _convert_message(
     return converted
 
 
+def _convert_chat_message(
+    message: JSON,
+    completed_tool_use_ids: set[str] | None = None,
+    *,
+    request_id: str | None = None,
+) -> list[JSON]:
+    completed_tool_use_ids = completed_tool_use_ids or set()
+    role = str(message.get("role") or "user")
+    content = message.get("content")
+    if isinstance(content, str):
+        return [_message(role, content)]
+    if not isinstance(content, list):
+        return [_message(role, _compact_json(content))]
+
+    converted: list[JSON] = []
+    text_parts: list[str] = []
+    tool_calls: list[JSON] = []
+    synthetic_outputs: list[JSON] = []
+    for block in content:
+        if not isinstance(block, dict):
+            text_parts.append(str(block))
+            continue
+
+        block_type = block.get("type")
+        if block_type in {"text", "input_text", "output_text"}:
+            text_parts.append(str(block.get("text") or block.get("content") or ""))
+        elif block_type == "tool_use":
+            call_id = str(block.get("id") or "")
+            name = str(block.get("name") or "")
+            tool_calls.append(_chat_tool_call(call_id, name, block.get("input") or {}))
+            if call_id not in completed_tool_use_ids:
+                synthetic_outputs.append(
+                    _chat_tool_result_message(
+                        call_id,
+                        _synthetic_tool_result_output(name),
+                    )
+                )
+                logger.debug(
+                    "Repaired orphaned Atuin tool call history request_id=%s "
+                    "tool_name=%s call_id=%s",
+                    request_id,
+                    name,
+                    call_id,
+                )
+        elif block_type == "tool_result":
+            if text_parts:
+                converted.append(_message(role, "\n".join(text_parts)))
+                text_parts = []
+            converted.append(
+                _chat_tool_result_message(
+                    str(block.get("tool_use_id") or ""),
+                    _tool_result_output(block),
+                )
+            )
+        else:
+            text_parts.append(_compact_json(block))
+
+    if tool_calls:
+        converted.append(
+            {
+                "role": "assistant",
+                "content": "\n".join(text_parts) if text_parts else None,
+                "tool_calls": tool_calls,
+            }
+        )
+        converted.extend(synthetic_outputs)
+    elif text_parts:
+        converted.append(_message(role, "\n".join(text_parts)))
+    return converted
+
+
+def _chat_tool_call(call_id: str, name: str, arguments: Any) -> JSON:
+    return {
+        "id": call_id,
+        "type": "function",
+        "function": {
+            "name": name,
+            "arguments": _compact_json(arguments),
+        },
+    }
+
+
+def _chat_tool_result_message(call_id: str, output: str) -> JSON:
+    return {"role": "tool", "tool_call_id": call_id, "content": output}
+
+
 def _responses_item_id(prefix: str, call_id: str) -> str:
     return f"{prefix}_{call_id}" if call_id else prefix
 
@@ -247,7 +429,14 @@ def _synthetic_tool_result_output(name: str) -> str:
 
 
 def _tool_call_from_item(item: JSON) -> JSON:
-    raw_arguments = item.get("arguments") or "{}"
+    return _tool_call_payload(
+        str(item.get("call_id") or item.get("id") or ""),
+        str(item.get("name") or ""),
+        item.get("arguments") or "{}",
+    )
+
+
+def _tool_call_payload(call_id: str, name: str, raw_arguments: Any) -> JSON:
     try:
         arguments = json.loads(raw_arguments) if isinstance(raw_arguments, str) else raw_arguments
     except json.JSONDecodeError:
@@ -255,16 +444,89 @@ def _tool_call_from_item(item: JSON) -> JSON:
     if not isinstance(arguments, dict):
         arguments = {"value": arguments}
 
-    name = str(item.get("name") or "")
     if name == "suggest_command":
         arguments.setdefault("danger", "low")
         arguments.setdefault("confidence", "medium")
 
     return {
-        "id": str(item.get("call_id") or item.get("id") or ""),
+        "id": call_id,
         "name": name,
         "input": arguments,
     }
+
+
+def _chat_done_event(event: str, data: JSON) -> bool:
+    return event == "done" or data.get("message") == "[DONE]"
+
+
+def _chat_choice_index(choice: JSON) -> int:
+    try:
+        return int(choice.get("index") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _chat_tool_index(tool_call: JSON) -> int:
+    try:
+        return int(tool_call.get("index") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _accumulate_chat_tool_calls(
+    choice_index: int,
+    delta: JSON,
+    pending_tool_calls: dict[tuple[int, int], JSON],
+) -> None:
+    tool_calls = delta.get("tool_calls")
+    if isinstance(tool_calls, list):
+        for tool_call in tool_calls:
+            if not isinstance(tool_call, dict):
+                continue
+            key = (choice_index, _chat_tool_index(tool_call))
+            pending = pending_tool_calls.setdefault(
+                key,
+                {"id": "", "name": "", "arguments": ""},
+            )
+            if tool_call.get("id"):
+                pending["id"] = str(tool_call["id"])
+            function = tool_call.get("function") or {}
+            if isinstance(function, dict):
+                if function.get("name"):
+                    pending["name"] = str(function["name"])
+                if function.get("arguments"):
+                    pending["arguments"] += str(function["arguments"])
+
+    function_call = delta.get("function_call")
+    if isinstance(function_call, dict):
+        pending = pending_tool_calls.setdefault(
+            (choice_index, 0),
+            {"id": "", "name": "", "arguments": ""},
+        )
+        if function_call.get("name"):
+            pending["name"] = str(function_call["name"])
+        if function_call.get("arguments"):
+            pending["arguments"] += str(function_call["arguments"])
+
+
+def _drain_chat_tool_calls(
+    pending_tool_calls: dict[tuple[int, int], JSON],
+    *,
+    choice_index: int | None = None,
+) -> Iterator[bytes]:
+    keys = sorted(pending_tool_calls)
+    for key in keys:
+        if choice_index is not None and key[0] != choice_index:
+            continue
+        pending = pending_tool_calls.pop(key)
+        yield encode_sse_event(
+            "tool_call",
+            _tool_call_payload(
+                str(pending.get("id") or ""),
+                str(pending.get("name") or ""),
+                pending.get("arguments") or "{}",
+            ),
+        )
 
 
 def _error_message(data: JSON) -> str:
