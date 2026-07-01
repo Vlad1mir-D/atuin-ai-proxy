@@ -1,3 +1,4 @@
+*.log
 atuin
 .env
 docker-compose.yaml
