@@ -44,6 +44,13 @@ CODEX_HOME=/data/codex
 MODEL=...
 ```
 
+Server binding:
+
+```sh
+HOST=0.0.0.0
+PORT=8000
+```
+
 `OPENAI_API` accepts `auto`, `responses`, or `chat_completions`. The default
 `auto` mode tries Chat Completions first and falls back to Responses when the
 Chat Completions request is rejected as unsupported.
@@ -56,6 +63,7 @@ docker compose up
 ```
 
 To use an existing Codex CLI auth file, mount it as `/data/codex/auth.json` or set `CODEX_AUTH_FILE` to the mounted path.
+`CODEX_CLIENT_ID` can override the bundled Codex OAuth client id when needed.
 
 ## Local development
 
