@@ -11,6 +11,42 @@ from atuin_ai_proxy.protocol import (
 from atuin_ai_proxy.settings import Settings
 
 
+def _history_request() -> dict[str, object]:
+    return {
+        "messages": [
+            {"role": "user", "content": "list files"},
+            {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "call_1",
+                        "name": "read_file",
+                        "input": {"file_path": "README.md"},
+                    }
+                ],
+            },
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "call_1",
+                        "content": "hello",
+                        "is_error": False,
+                    }
+                ],
+            },
+        ],
+        "context": {"shell": "bash", "pwd": "/tmp"},
+        "config": {
+            "capabilities": ["client_v1_read_file"],
+            "model": None,
+        },
+        "invocation_id": "inv-1",
+    }
+
+
 class ProtocolTests(unittest.TestCase):
     def test_encode_sse_event_uses_atuin_wire_format(self) -> None:
         self.assertEqual(
@@ -24,39 +60,7 @@ class ProtocolTests(unittest.TestCase):
             model="gpt-test",
             openai_api_key="sk-test",
         )
-        atuin_request = {
-            "messages": [
-                {"role": "user", "content": "list files"},
-                {
-                    "role": "assistant",
-                    "content": [
-                        {
-                            "type": "tool_use",
-                            "id": "call_1",
-                            "name": "read_file",
-                            "input": {"file_path": "README.md"},
-                        }
-                    ],
-                },
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "tool_result",
-                            "tool_use_id": "call_1",
-                            "content": "hello",
-                            "is_error": False,
-                        }
-                    ],
-                },
-            ],
-            "context": {"shell": "bash", "pwd": "/tmp"},
-            "config": {
-                "capabilities": ["client_v1_read_file"],
-                "model": None,
-            },
-            "invocation_id": "inv-1",
-        }
+        atuin_request = _history_request()
 
         body = build_responses_request(atuin_request, settings)
 
@@ -291,39 +295,7 @@ class ProtocolTests(unittest.TestCase):
             model="chat-model",
             openai_api_key="sk-test",
         )
-        atuin_request = {
-            "messages": [
-                {"role": "user", "content": "list files"},
-                {
-                    "role": "assistant",
-                    "content": [
-                        {
-                            "type": "tool_use",
-                            "id": "call_1",
-                            "name": "read_file",
-                            "input": {"file_path": "README.md"},
-                        }
-                    ],
-                },
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "tool_result",
-                            "tool_use_id": "call_1",
-                            "content": "hello",
-                            "is_error": False,
-                        }
-                    ],
-                },
-            ],
-            "context": {"shell": "bash", "pwd": "/tmp"},
-            "config": {
-                "capabilities": ["client_v1_read_file"],
-                "model": None,
-            },
-            "invocation_id": "inv-1",
-        }
+        atuin_request = _history_request()
 
         body = build_chat_completions_request(atuin_request, settings)
 

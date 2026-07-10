@@ -1,4 +1,5 @@
 import json
+import logging
 import signal
 import unittest
 from io import BytesIO
@@ -36,29 +37,6 @@ class FakeBackend:
             [
                 ("response.output_text.delta", {"delta": "hello"}),
                 ("response.completed", {}),
-            ]
-        )
-
-
-class ChatCompletionsBackend:
-    def open_stream(self, body, request_id=None, api="responses"):
-        self.body = body
-        self.api = api
-        return 200, {}, iter(
-            [
-                (
-                    "message",
-                    {
-                        "choices": [
-                            {
-                                "index": 0,
-                                "delta": {"content": "hello"},
-                                "finish_reason": None,
-                            }
-                        ]
-                    },
-                ),
-                ("message", {"message": "[DONE]"}),
             ]
         )
 
@@ -119,6 +97,14 @@ class StreamingFailureBackend:
 
 
 class ServerTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # Expected failure-path logs should not look like test-runner failures.
+        self.enterContext(
+            patch.object(logging.getLogger("atuin_ai_proxy.server"), "disabled", True)
+        )
+        self.enterContext(patch("atuin_ai_proxy.server.logging.basicConfig"))
+        self.enterContext(patch("atuin_ai_proxy.server.logging.info"))
+
     def test_healthz_returns_ok(self) -> None:
         backend = FakeBackend()
         response = handle_request(
@@ -132,18 +118,8 @@ class ServerTests(unittest.TestCase):
 
     def test_chat_endpoint_streams_atuin_events(self) -> None:
         backend = FakeBackend()
-        payload = json.dumps({"messages": [], "config": {}, "invocation_id": "i"})
-        request = (
-            "POST /api/cli/chat HTTP/1.1\r\n"
-            "Host: localhost\r\n"
-            "Content-Type: application/json\r\n"
-            "Authorization: Bearer proxy-token\r\n"
-            f"Content-Length: {len(payload.encode())}\r\n"
-            "\r\n"
-            f"{payload}"
-        ).encode()
         response = handle_request(
-            request,
+            _chat_request(token="proxy-token"),
             Settings(
                 backend="openai",
                 model="gpt-test",
@@ -162,18 +138,9 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(backend.body["model"], "gpt-test")
 
     def test_chat_endpoint_auto_uses_chat_completions_first(self) -> None:
-        backend = ChatCompletionsBackend()
-        payload = json.dumps({"messages": [], "config": {}, "invocation_id": "i"})
-        request = (
-            "POST /api/cli/chat HTTP/1.1\r\n"
-            "Host: localhost\r\n"
-            "Content-Type: application/json\r\n"
-            f"Content-Length: {len(payload.encode())}\r\n"
-            "\r\n"
-            f"{payload}"
-        ).encode()
+        backend = FakeBackend()
         response = handle_request(
-            request,
+            _chat_request(),
             Settings(
                 backend="openai",
                 model="gpt-test",
@@ -192,17 +159,8 @@ class ServerTests(unittest.TestCase):
 
     def test_chat_endpoint_auto_falls_back_to_responses_after_chat_rejection(self) -> None:
         backend = ChatCompletionsFallbackBackend()
-        payload = json.dumps({"messages": [], "config": {}, "invocation_id": "i"})
-        request = (
-            "POST /api/cli/chat HTTP/1.1\r\n"
-            "Host: localhost\r\n"
-            "Content-Type: application/json\r\n"
-            f"Content-Length: {len(payload.encode())}\r\n"
-            "\r\n"
-            f"{payload}"
-        ).encode()
         response = handle_request(
-            request,
+            _chat_request(),
             Settings(
                 backend="openai",
                 model="gpt-test",
@@ -244,18 +202,8 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(payload["error"]["request_id"], response.headers["x-request-id"])
 
     def test_chat_endpoint_returns_structured_missing_model_error(self) -> None:
-        payload = json.dumps({"messages": [], "config": {}, "invocation_id": "i"})
-        request = (
-            "POST /api/cli/chat HTTP/1.1\r\n"
-            "Host: localhost\r\n"
-            "Content-Type: application/json\r\n"
-            f"Content-Length: {len(payload.encode())}\r\n"
-            "\r\n"
-            f"{payload}"
-        ).encode()
-
         response = handle_request(
-            request,
+            _chat_request(),
             Settings(backend="openai", openai_api_key="sk-test"),
             lambda _settings: FakeBackend(),
         )
@@ -268,18 +216,8 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(error["request_id"], response.headers["x-request-id"])
 
     def test_chat_endpoint_returns_sanitized_upstream_http_error(self) -> None:
-        payload = json.dumps({"messages": [], "config": {}, "invocation_id": "i"})
-        request = (
-            "POST /api/cli/chat HTTP/1.1\r\n"
-            "Host: localhost\r\n"
-            "Content-Type: application/json\r\n"
-            f"Content-Length: {len(payload.encode())}\r\n"
-            "\r\n"
-            f"{payload}"
-        ).encode()
-
         response = handle_request(
-            request,
+            _chat_request(),
             Settings(backend="openai", model="gpt-test", openai_api_key="sk-test"),
             lambda _settings: FailingHTTPBackend(),
         )
@@ -295,18 +233,8 @@ class ServerTests(unittest.TestCase):
         self.assertNotIn("acct-secret", error["details"])
 
     def test_streaming_failure_emits_error_event_with_request_id(self) -> None:
-        payload = json.dumps({"messages": [], "config": {}, "invocation_id": "i"})
-        request = (
-            "POST /api/cli/chat HTTP/1.1\r\n"
-            "Host: localhost\r\n"
-            "Content-Type: application/json\r\n"
-            f"Content-Length: {len(payload.encode())}\r\n"
-            "\r\n"
-            f"{payload}"
-        ).encode()
-
         response = handle_request(
-            request,
+            _chat_request(),
             Settings(backend="openai", model="gpt-test", openai_api_key="sk-test"),
             lambda _settings: StreamingFailureBackend(),
         )
@@ -377,6 +305,20 @@ class Response:
             key, _separator, value = line.partition(":")
             self.headers[key.lower()] = value.strip()
         self.body = body
+
+
+def _chat_request(*, token: str | None = None) -> bytes:
+    payload = json.dumps({"messages": [], "config": {}, "invocation_id": "i"})
+    authorization = f"Authorization: Bearer {token}\r\n" if token else ""
+    return (
+        "POST /api/cli/chat HTTP/1.1\r\n"
+        "Host: localhost\r\n"
+        "Content-Type: application/json\r\n"
+        f"{authorization}"
+        f"Content-Length: {len(payload.encode())}\r\n"
+        "\r\n"
+        f"{payload}"
+    ).encode()
 
 
 def handle_request(request: bytes, settings: Settings, backend_factory) -> Response:
