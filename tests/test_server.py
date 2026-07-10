@@ -275,6 +275,27 @@ class ServerTests(unittest.TestCase):
         self.assertTrue(servers[0].closed)
         self.assertEqual(sigterm_handlers[-1], signal.SIG_DFL)
 
+    def test_run_server_warns_when_chat_completions_is_ignored_for_codex(self) -> None:
+        with (
+            patch("atuin_ai_proxy.server.ProxyHTTPServer") as server_class,
+            patch("atuin_ai_proxy.server.logger.warning") as warning,
+            patch("signal.signal", return_value=signal.SIG_DFL),
+        ):
+            run_server(
+                Settings(
+                    backend="codex-token",
+                    model="gpt-test",
+                    openai_api="chat_completions",
+                )
+            )
+
+        server_class.return_value.serve_forever.assert_called_once_with()
+        warning.assert_called_once_with(
+            "OPENAI_API=%s is ignored for BACKEND=%s; Codex backends support only the Responses API",
+            "chat_completions",
+            "codex-token",
+        )
+
 
 class NonClosingBytesIO(BytesIO):
     def close(self) -> None:

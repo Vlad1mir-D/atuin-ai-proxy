@@ -9,7 +9,7 @@ from atuin_ai_proxy.cli import main
 
 class CliTests(unittest.TestCase):
     def test_serve_accepts_each_supported_log_level(self) -> None:
-        for log_level in ("TRACE", "DEBUG", "INFO", "ERROR"):
+        for log_level in ("TRACE", "DEBUG", "INFO", "WARNING", "ERROR"):
             with self.subTest(log_level=log_level):
                 with (
                     patch.dict(os.environ, {}, clear=True),
@@ -33,7 +33,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(settings.log_level, "ERROR")
 
     def test_serve_rejects_removed_and_unsupported_log_level_flags(self) -> None:
-        for arguments in (("--debug",), ("--log-level", "WARNING")):
+        for arguments in (("--debug",), ("--log-level", "NOTICE")):
             with self.subTest(arguments=arguments):
                 with redirect_stderr(StringIO()), self.assertRaises(SystemExit) as error:
                     main(["serve", *arguments])

@@ -399,6 +399,12 @@ def run_server(settings: Settings) -> None:
         level=log_level_value(settings.log_level),
         format="%(asctime)s %(levelname)s %(message)s",
     )
+    if settings.backend != "openai" and settings.openai_api == "chat_completions":
+        logger.warning(
+            "OPENAI_API=%s is ignored for BACKEND=%s; Codex backends support only the Responses API",
+            settings.openai_api,
+            settings.backend,
+        )
     server = ProxyHTTPServer((settings.host, settings.port), settings)
     logging.info("Listening on %s:%s", settings.host, settings.port)
     previous_sigterm_handler = signal.signal(signal.SIGTERM, _raise_keyboard_interrupt)

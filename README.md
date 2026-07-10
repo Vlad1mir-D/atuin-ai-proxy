@@ -51,9 +51,14 @@ HOST=0.0.0.0
 PORT=8000
 ```
 
-`OPENAI_API` accepts `auto`, `responses`, or `chat_completions`. The default
-`auto` mode tries Chat Completions first and falls back to Responses when the
-Chat Completions request is rejected as unsupported.
+`OPENAI_API` applies only to `BACKEND=openai` and accepts `auto`, `responses`,
+or `chat_completions`. The default `auto` mode tries Chat Completions first and
+falls back to Responses when the Chat Completions request is rejected as
+unsupported.
+
+The `codex-token` and `codex-oauth` backends support only the Responses API. If
+`OPENAI_API=chat_completions` is configured with either Codex backend, the proxy
+logs a startup warning and uses the Responses API.
 
 For Codex OAuth device login:
 
@@ -86,6 +91,9 @@ Logging levels:
 # Normal operational logs
 LOG_LEVEL=INFO
 
+# Startup warnings and errors only
+LOG_LEVEL=WARNING
+
 # Request/backend diagnostics: model source, upstream status, tool names, timings
 LOG_LEVEL=DEBUG
 
@@ -95,7 +103,7 @@ TRACE_PAYLOAD_BYTES=4096
 ```
 
 For local runs, the `serve` command can override `LOG_LEVEL` with any level the
-proxy emits: `TRACE`, `DEBUG`, `INFO`, or `ERROR`.
+proxy emits: `TRACE`, `DEBUG`, `INFO`, `WARNING`, or `ERROR`.
 
 ```sh
 python3 -m atuin_ai_proxy serve --log-level DEBUG
