@@ -5,14 +5,18 @@ import logging
 import signal
 import socket
 import time
-import uuid
 from json import JSONDecodeError
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable
 from urllib.parse import urlparse
 
-from .backend import BackendHTTPError, ResponsesBackend
+from .backend import (
+    BackendHTTPError,
+    ResponsesBackend,
+    canonical_uuid7_string,
+    new_uuid7,
+)
 from .auth import AuthError
 from .diagnostics import (
     TRACE_LEVEL,
@@ -98,13 +102,19 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
 
         try:
             atuin_request = self._read_json_body()
-            session_id = str(atuin_request.get("session_id") or uuid.uuid4())
+            requested_session_id = atuin_request.get("session_id")
+            session_id = (
+                canonical_uuid7_string(str(requested_session_id))
+                if requested_session_id
+                else None
+            ) or new_uuid7()
             resolve_model(atuin_request, self.server.settings)
             backend = self.server.backend_factory(self.server.settings)
             upstream_api, translate_events, upstream_events = self._open_upstream_stream(
                 backend,
                 atuin_request,
                 request_id,
+                session_id,
             )
         except JSONDecodeError as exc:
             self._send_error(
@@ -278,6 +288,7 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         backend: Any,
         atuin_request: dict[str, Any],
         request_id: str,
+        session_id: str,
     ) -> tuple[str, Callable[[Any, str], Any], Any]:
         candidates = self.server.settings.openai_api_candidates()
         for index, upstream_api in enumerate(candidates):
@@ -292,6 +303,7 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
                     upstream_body,
                     request_id=request_id,
                     api=upstream_api,
+                    session_id=session_id,
                 )
                 return upstream_api, translate_events, upstream_events
             except BackendHTTPError as exc:

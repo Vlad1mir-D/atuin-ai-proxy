@@ -2,6 +2,7 @@ import json
 import logging
 import signal
 import unittest
+import uuid
 from io import BytesIO
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -12,9 +13,10 @@ from atuin_ai_proxy.settings import Settings
 
 
 class FakeBackend:
-    def open_stream(self, body, request_id=None, api="responses"):
+    def open_stream(self, body, request_id=None, api="responses", session_id=None):
         self.body = body
         self.api = api
+        self.session_id = session_id
         if api == "chat_completions":
             return 200, {}, iter(
                 [
@@ -45,7 +47,7 @@ class ChatCompletionsFallbackBackend:
     def __init__(self) -> None:
         self.calls = []
 
-    def open_stream(self, body, request_id=None, api="responses"):
+    def open_stream(self, body, request_id=None, api="responses", session_id=None):
         self.calls.append((api, body))
         if api == "chat_completions":
             raise BackendHTTPError(400, '{"detail":"chat completions rejected"}')
@@ -58,7 +60,7 @@ class ChatCompletionsFallbackBackend:
 
 
 class FailingHTTPBackend:
-    def open_stream(self, body, request_id=None, api="responses"):
+    def open_stream(self, body, request_id=None, api="responses", session_id=None):
         raise BackendHTTPError(
             400,
             json.dumps(
@@ -74,7 +76,7 @@ class FailingHTTPBackend:
 
 
 class StreamingFailureBackend:
-    def open_stream(self, body, request_id=None, api="responses"):
+    def open_stream(self, body, request_id=None, api="responses", session_id=None):
         def events():
             if api == "chat_completions":
                 yield (
@@ -136,6 +138,28 @@ class ServerTests(unittest.TestCase):
         self.assertIn('event: text\ndata: {"content":"hello"}\n\n', body)
         self.assertIn("event: done", body)
         self.assertEqual(backend.body["model"], "gpt-test")
+        self.assertEqual(uuid.UUID(backend.session_id).version, 7)
+        self.assertEqual(
+            backend.session_id,
+            response.headers["x-atuin-ai-session-id"],
+        )
+
+    def test_chat_endpoint_replaces_unexpected_session_id(self) -> None:
+        backend = FakeBackend()
+        response = handle_request(
+            _chat_request(session_id="legacy-session"),
+            Settings(
+                backend="openai",
+                model="gpt-test",
+                openai_api_key="sk-test",
+            ),
+            lambda _settings: backend,
+        )
+
+        replacement = response.headers["x-atuin-ai-session-id"]
+        self.assertNotEqual(replacement, "legacy-session")
+        self.assertEqual(uuid.UUID(replacement).version, 7)
+        self.assertEqual(backend.session_id, replacement)
 
     def test_chat_endpoint_auto_uses_chat_completions_first(self) -> None:
         backend = FakeBackend()
@@ -328,8 +352,15 @@ class Response:
         self.body = body
 
 
-def _chat_request(*, token: str | None = None) -> bytes:
-    payload = json.dumps({"messages": [], "config": {}, "invocation_id": "i"})
+def _chat_request(
+    *,
+    token: str | None = None,
+    session_id: str | None = None,
+) -> bytes:
+    request = {"messages": [], "config": {}, "invocation_id": "i"}
+    if session_id:
+        request["session_id"] = session_id
+    payload = json.dumps(request)
     authorization = f"Authorization: Bearer {token}\r\n" if token else ""
     return (
         "POST /api/cli/chat HTTP/1.1\r\n"
