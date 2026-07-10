@@ -5,6 +5,7 @@ import json
 import sys
 
 from .auth import AuthError, CodexAuthFileProvider, CodexDeviceAuthenticator
+from .diagnostics import SUPPORTED_LOG_LEVELS
 from .server import run_server
 from .settings import Settings
 
@@ -17,9 +18,10 @@ def main(argv: list[str] | None = None) -> int:
     serve.add_argument("--host")
     serve.add_argument("--port", type=int)
     serve.add_argument(
-        "--debug",
-        action="store_true",
-        help="Shortcut for LOG_LEVEL=DEBUG",
+        "--log-level",
+        type=str.upper,
+        choices=SUPPORTED_LOG_LEVELS,
+        help="Set the log level (overrides LOG_LEVEL)",
     )
 
     auth = subparsers.add_parser("auth", help="Manage Codex OAuth credentials")
@@ -38,8 +40,8 @@ def main(argv: list[str] | None = None) -> int:
                 settings.host = args.host
             if args.port:
                 settings.port = args.port
-            if args.debug:
-                settings.log_level = "DEBUG"
+            if args.log_level:
+                settings.log_level = args.log_level
             run_server(settings)
             return 0
         if args.command == "auth":

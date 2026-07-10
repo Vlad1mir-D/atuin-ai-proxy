@@ -94,6 +94,13 @@ LOG_LEVEL=TRACE
 TRACE_PAYLOAD_BYTES=4096
 ```
 
+For local runs, the `serve` command can override `LOG_LEVEL` with any level the
+proxy emits: `TRACE`, `DEBUG`, `INFO`, or `ERROR`.
+
+```sh
+python3 -m atuin_ai_proxy serve --log-level DEBUG
+```
+
 TRACE output is sanitized and bounded, but it can still include shell history,
 prompts, paths, and command output. Use it only while diagnosing a problem.
 
